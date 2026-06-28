@@ -1,0 +1,27 @@
+{
+  "name": "claude-session-viewer",
+  "version": "1.0.0",
+  "description": "Local web viewer for Claude Code session history — sessions list, token usage, cost dashboard",
+  "bin": {
+    "claude-session-viewer": "./session-viewer.js"
+  },
+  "main": "./session-viewer.js",
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "session",
+    "viewer",
+    "token",
+    "cost",
+    "dashboard"
+  ],
+  "author": "Malburi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Malburi/claude-session-viewer"
+  }
+}
