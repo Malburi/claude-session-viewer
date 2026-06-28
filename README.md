@@ -46,5 +46,10 @@ Then open **http://localhost:3000** in your browser.
 
 ## Screenshots
 
-Sessions page — project tree, search, token chips per message  
-Dashboard page — stat cards, daily cost chart, sortable session table with per-session cost
+**Sessions** — project tree, search, token chips per message
+
+![Sessions](screenshots/sessions.png)
+
+**Dashboard** — stat cards, daily cost chart, project breakdown, per-session cost table
+
+![Dashboard](screenshots/dashboard.png)
