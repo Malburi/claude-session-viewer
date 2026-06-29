@@ -21,6 +21,15 @@ Local web viewer for **Claude Code** session history.
 npx github:Malburi/claude-session-viewer
 ```
 
+### Run without installing (클론방식)
+
+```bash
+git clone https://github.com/Malburi/claude-session-viewer.git
+cd claude-session-viewer
+npm install
+node session-viewer.js   # 또는 npm start
+```
+
 ### Install globally
 
 ```bash
