@@ -1,12 +1,17 @@
 # claude-session-viewer
 
-Local web viewer for **Claude Code** session history.
+Local web viewer for **Claude Code** session history — browse conversations, track token usage, analyze costs.
 
-- Browse all sessions across projects
-- View full conversation history
-- Token usage per session and per message
-- Cost estimation dashboard (by model: sonnet / opus / haiku)
-- Daily cost chart, per-session cost table, project & model breakdown
+## Features
+
+- **Session list** — project tree, search by title/content, date range filter, newest/oldest sort toggle
+- **Cost display** — estimated cost per session shown inline in the list
+- **Conversation view** — full message history with token counts; Tools ON/OFF reveals tool calls (with inputs) and tool results
+- **Dashboard** — date range filter updates all charts and stats in real time
+  - Daily cost line chart, by-model breakdown, by-project bars
+  - Sortable per-session cost table
+- **Static export** — generate a standalone HTML file with no server required (`npm run static`)
+- **KST timezone** — dates displayed in local time
 
 ## Requirements
 
@@ -21,14 +26,23 @@ Local web viewer for **Claude Code** session history.
 npx github:Malburi/claude-session-viewer
 ```
 
-### Run without installing (클론방식)
+### Clone and run
 
 ```bash
 git clone https://github.com/Malburi/claude-session-viewer.git
 cd claude-session-viewer
-npm install
-node session-viewer.js   # 또는 npm start
+npm start
 ```
+
+Then open **http://localhost:3000** in your browser.
+
+### Static mode (no server)
+
+```bash
+npm run static
+```
+
+Generates a self-contained HTML file with all session data embedded and opens it directly in the browser. No server process runs.
 
 ### Install globally
 
@@ -37,13 +51,12 @@ npm install -g github:Malburi/claude-session-viewer
 claude-session-viewer
 ```
 
-Then open **http://localhost:3000** in your browser.
-
 ## Options
 
 ```
 --port <n>   Use a different port (default: 3000)
 --no-open    Don't auto-open the browser
+--static     Generate standalone HTML file and exit
 ```
 
 ## Pages
@@ -55,10 +68,10 @@ Then open **http://localhost:3000** in your browser.
 
 ## Screenshots
 
-**Sessions** — project tree, search, token chips per message
+**Sessions** — project tree, date filter, cost per session, sort toggle, tool content
 
 ![Sessions](screenshots/sessions.png)
 
-**Dashboard** — stat cards, daily cost chart, project breakdown, per-session cost table
+**Dashboard** — period filter, stat cards, daily cost chart, model & project breakdown
 
 ![Dashboard](screenshots/dashboard.png)
