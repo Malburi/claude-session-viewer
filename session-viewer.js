@@ -14,7 +14,7 @@ const PORT    = parseInt(args[args.indexOf('--port') + 1] || '3000', 10) || 3000
 const BASE    = path.join(os.homedir(), '.claude', 'projects');
 const NO_OPEN = args.includes('--no-open');
 
-// ── JSONL parser ──────────────────────────────────────────────────────────────
+// ── JSONL parser (Claude) ─────────────────────────────────────────────────────
 function cleanText(text) {
   return text
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
@@ -119,17 +119,18 @@ function parseSession(filePath) {
 
   if (!messages.length) return null;
   return {
-    id:      path.basename(filePath, '.jsonl'),
-    title:   title || '(no title)',
-    date:    mtime.toLocaleString('sv-SE', { hour12: false }).slice(0, 16),
-    project: path.basename(path.dirname(filePath)),
+    id:       path.basename(filePath, '.jsonl'),
+    title:    title || '(no title)',
+    date:     mtime.toLocaleString('sv-SE', { hour12: false }).slice(0, 16),
+    project:  path.basename(path.dirname(filePath)),
     model,
     totals,
-    msgs:    messages,
+    msgs:     messages,
+    provider: 'claude',
   };
 }
 
-function loadAllSessions() {
+function loadClaudeSessions() {
   if (!fs.existsSync(BASE)) return [];
   const sessions = [];
   let dirs;
@@ -145,8 +146,151 @@ function loadAllSessions() {
       if (s) sessions.push(s);
     }
   }
-  sessions.sort((a, b) => b.date.localeCompare(a.date));
   return sessions;
+}
+
+// ── Codex parser ──────────────────────────────────────────────────────────────
+function parseCodexSession(filePath) {
+  let raw;
+  try { raw = fs.readFileSync(filePath, 'utf8'); } catch { return null; }
+
+  let id = '', cwd = '', sessionTs = '';
+  const messages = [];
+  let lastTokenCount = null;
+
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    if (d.type === 'session_meta' && d.payload) {
+      id = d.payload.id || '';
+      cwd = d.payload.cwd || '';
+      sessionTs = d.payload.timestamp || '';
+    }
+    if (d.type === 'event_msg' && d.payload) {
+      const p = d.payload;
+      if (p.type === 'user_message' && p.message)
+        messages.push({ role: 'user', text: p.message, tok: null });
+      if (p.type === 'agent_message' && p.message)
+        messages.push({ role: 'assistant', text: p.message, tok: null });
+      if (p.type === 'token_count' && p.info && p.info.total_token_usage)
+        lastTokenCount = p.info.total_token_usage;
+    }
+  }
+
+  if (!messages.length) return null;
+
+  const totals = lastTokenCount ? {
+    input:       lastTokenCount.input_tokens        || 0,
+    output:      lastTokenCount.output_tokens       || 0,
+    cacheRead:   lastTokenCount.cached_input_tokens || 0,
+    cacheCreate: 0,
+  } : { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
+
+  // Date from filename: rollout-YYYY-MM-DDTHH-MM-SS-uuid.jsonl
+  const fname = path.basename(filePath, '.jsonl');
+  const dtM = fname.match(/(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/);
+  let date = '';
+  if (dtM) {
+    date = new Date(dtM[1] + 'T' + dtM[2] + ':' + dtM[3] + ':' + dtM[4] + 'Z')
+      .toLocaleString('sv-SE', { hour12: false }).slice(0, 16);
+  } else if (sessionTs) {
+    date = new Date(sessionTs).toLocaleString('sv-SE', { hour12: false }).slice(0, 16);
+  }
+
+  const firstUser = messages.find(m => m.role === 'user');
+  const title = firstUser ? firstUser.text.split('\n')[0].slice(0, 80) : '(no title)';
+  const projBase = cwd ? path.basename(cwd) : 'codex';
+
+  return {
+    id:       id || fname,
+    title,
+    date,
+    project:  '[codex] ' + projBase,
+    model:    'codex',
+    totals,
+    msgs:     messages,
+    provider: 'codex',
+  };
+}
+
+function loadCodexSessions() {
+  const codexBase = path.join(os.homedir(), '.codex', 'sessions');
+  if (!fs.existsSync(codexBase)) return [];
+  const sessions = [];
+  function walk(dir) {
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { return; }
+    for (const f of entries) {
+      const full = path.join(dir, f);
+      let stat;
+      try { stat = fs.statSync(full); } catch { continue; }
+      if (stat.isDirectory()) walk(full);
+      else if (f.endsWith('.jsonl')) {
+        const s = parseCodexSession(full);
+        if (s) sessions.push(s);
+      }
+    }
+  }
+  walk(codexBase);
+  return sessions;
+}
+
+// ── Gemini parser ─────────────────────────────────────────────────────────────
+function loadGeminiSessions() {
+  const geminiBase = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+  if (!fs.existsSync(geminiBase)) return [];
+  const sessions = [];
+  let dirs;
+  try { dirs = fs.readdirSync(geminiBase); } catch { return []; }
+
+  for (const sessionId of dirs) {
+    const sessionDir = path.join(geminiBase, sessionId);
+    try { if (!fs.statSync(sessionDir).isDirectory()) continue; } catch { continue; }
+
+    let summary = '', updatedAt = '';
+    let walkthrough = '';
+
+    for (const mf of ['walkthrough.md.metadata.json', 'task.md.metadata.json', 'implementation_plan.md.metadata.json']) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(sessionDir, mf), 'utf8'));
+        if (!summary && meta.summary) summary = meta.summary;
+        if (meta.updatedAt && (!updatedAt || meta.updatedAt > updatedAt)) updatedAt = meta.updatedAt;
+      } catch {}
+    }
+    try { walkthrough = fs.readFileSync(path.join(sessionDir, 'walkthrough.md'), 'utf8').trim(); } catch {}
+    if (!walkthrough) {
+      try { walkthrough = fs.readFileSync(path.join(sessionDir, 'task.md'), 'utf8').trim(); } catch {}
+    }
+
+    if (!summary && !walkthrough) continue;
+
+    const msgs = [];
+    if (summary) msgs.push({ role: 'user', text: summary, tok: null });
+    if (walkthrough) msgs.push({ role: 'assistant', text: walkthrough, tok: null });
+    if (!msgs.length) continue;
+
+    const date = updatedAt ? new Date(updatedAt).toLocaleString('sv-SE', { hour12: false }).slice(0, 16) : '';
+
+    sessions.push({
+      id:       sessionId,
+      title:    summary || '(Gemini session)',
+      date,
+      project:  '[gemini]',
+      model:    'gemini',
+      totals:   { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 },
+      msgs,
+      provider: 'gemini',
+    });
+  }
+  return sessions;
+}
+
+// ── unified loader ────────────────────────────────────────────────────────────
+function loadAllSessions() {
+  const all = [...loadClaudeSessions(), ...loadCodexSessions(), ...loadGeminiSessions()];
+  all.sort((a, b) => b.date.localeCompare(a.date));
+  return all;
 }
 
 // ── HTML (no template-literal interpolation issues) ───────────────────────────
@@ -205,11 +349,15 @@ function buildHtml(staticSessions) {
     '.si:hover{background:var(--sur2)}',
     '.si.active{background:var(--sur2);border-color:var(--acc2)}',
     '.si-ttl{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-    '.si-meta{font-size:11px;color:var(--mut);margin-top:2px;display:flex;justify-content:space-between;gap:6px}',
+    '.si-meta{font-size:11px;color:var(--mut);margin-top:2px;display:flex;align-items:center;gap:5px;flex-wrap:wrap}',
     '.si-cnt{background:var(--bdr);padding:1px 5px;border-radius:10px;font-size:10px;flex-shrink:0}',
     '.si-ptag{font-size:10px;color:var(--acc);opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     '.si-tok{font-size:10px;color:var(--mut);margin-top:1px}',
-    '.si-cost{font-size:10px;color:#6fcf6f;font-family:monospace;flex-shrink:0}',
+    '.si-cost{font-size:10px;color:#6fcf6f;font-family:monospace;flex-shrink:0;margin-left:auto}',
+    '.prov-badge{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700;letter-spacing:.04em;flex-shrink:0}',
+    '.prov-claude{background:#2a1f0a;color:#d97706;border:1px solid #4a3510}',
+    '.prov-codex{background:#0a2a0a;color:#4fc34f;border:1px solid #1a4a1a}',
+    '.prov-gemini{background:#0a1a2a;color:#4faed9;border:1px solid #1a3a4a}',
     // main
     '#main{flex:1;display:flex;flex-direction:column;overflow:hidden}',
     '#cv-hdr{padding:11px 18px;border-bottom:1px solid var(--bdr);background:var(--sur);display:flex;align-items:center;gap:10px}',
@@ -353,11 +501,12 @@ function buildHtml(staticSessions) {
     '  opus:{i:15,o:75,cr:1.50,cc:18.75},',
     '  sonnet:{i:3,o:15,cr:0.30,cc:3.75},',
     '  haiku:{i:0.80,o:4,cr:0.08,cc:1.00},',
-    '  def:{i:3,o:15,cr:0.30,cc:3.75}',
+    '  def:{i:3,o:15,cr:0.30,cc:3.75},',
+    '  codex:{i:5,o:30,cr:2.50,cc:0}',
     '};',
     'function calcCost(model,t){',
     '  if(!t) return 0;',
-    '  var k=model?(model.indexOf("opus")>=0?"opus":model.indexOf("haiku")>=0?"haiku":"sonnet"):"def";',
+    '  var k=model==="codex"?"codex":model?(model.indexOf("opus")>=0?"opus":model.indexOf("haiku")>=0?"haiku":"sonnet"):"def";',
     '  var p=PRICING[k]||PRICING.def;',
     '  return(t.input*p.i+t.output*p.o+(t.cacheRead||0)*p.cr+(t.cacheCreate||0)*p.cc)/1e6;',
     '}',
@@ -378,7 +527,9 @@ function buildHtml(staticSessions) {
     '  el.innerHTML=sorted.map(function(s){',
     '    var ri=S.indexOf(s);',
     '    var t=s.msgs.filter(function(m){return m.role==="user";}).length;',
-    '    var cost=calcCost(s.model,s.totals);',
+    '    var prov=s.provider||"claude";',
+    '    var provBadge="<span class=\\"prov-badge prov-"+prov+"\\">"+prov.toUpperCase()+"</span>";',
+    '    var cost=(prov!=="gemini")?calcCost(s.model,s.totals):0;',
     '    var costStr=cost?"<span class=\\"si-cost\\">"+fmtCost(cost)+"</span>":"";',
     '    var tokStr="";',
     '    if(s.totals&&(s.totals.output||s.totals.input)){',
@@ -387,7 +538,7 @@ function buildHtml(staticSessions) {
     '    }',
     '    return "<div class=\\"si"+(ri===curIdx?" active":"")+"\\\" id=\\"si"+ri+"\\" data-idx=\\""+ri+"\\">"+',
     '      "<div class=\\"si-ttl\\">"+esc(s.title)+"</div>"+',
-    '      "<div class=\\"si-meta\\"><span>"+s.date+"</span><span class=\\"si-cnt\\">"+t+"t</span>"+costStr+"</div>"+',
+    '      "<div class=\\"si-meta\\"><span>"+s.date+"</span>"+provBadge+"<span class=\\"si-cnt\\">"+t+"t</span>"+costStr+"</div>"+',
     '      tokStr+',
     '      (activePrj===null?"<div class=\\"si-ptag\\">"+esc(shortName(s.project))+"</div>":"")+',
     '      "</div>";',
@@ -425,7 +576,7 @@ function buildHtml(staticSessions) {
     '  var modelShort=s.model?s.model.replace("claude-","").replace(/-\\d{8}$/,""):"";',
     '  document.getElementById("cv-sub").textContent=s.date+(modelShort?"  ·  "+modelShort:"")+"  ·  "+shortName(s.project);',
     '  var tokEl=document.getElementById("cv-tok");',
-    '  if(s.totals){',
+    '  if(s.totals&&(s.totals.input||s.totals.output)){',
     '    var to=s.totals;',
     '    tokEl.innerHTML=',
     '      "<span class=\\"tok-chip tok-out\\">out "+fmtK(to.output)+"</span>"+',
@@ -486,7 +637,7 @@ function buildHtml(staticSessions) {
   ].join('\n');
 
   const nav = '<nav style="height:38px;background:#111;border-bottom:1px solid #2e2e36;display:flex;align-items:center;padding:0 16px;gap:4px;flex-shrink:0">'
-    + '<span style="font-size:11px;font-weight:700;color:#d97706;letter-spacing:.08em;margin-right:12px">CLAUDE</span>'
+    + '<span style="font-size:11px;font-weight:700;color:#d97706;letter-spacing:.08em;margin-right:12px">AI SESSIONS</span>'
     + '<a href="/" style="padding:4px 12px;border-radius:5px;font-size:12px;text-decoration:none;background:#1a1a1f;color:#e2e2e8;border:1px solid #3a3a46">Sessions</a>'
     + '<a href="/dashboard" style="padding:4px 12px;border-radius:5px;font-size:12px;text-decoration:none;color:#888896">Dashboard</a>'
     + '</nav>';
@@ -494,14 +645,14 @@ function buildHtml(staticSessions) {
   return '<!DOCTYPE html>\n'
     + '<html lang="ko"><head><meta charset="UTF-8">'
     + '<meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<title>Claude Code Sessions</title>'
+    + '<title>AI Session Viewer</title>'
     + '<style>html,body{height:100%;margin:0}body{display:flex;flex-direction:column}' + css + '</style></head><body>'
     + nav
     + '<div id="overlay">Loading sessions…</div>'
     + '<div id="app" style="flex:1;overflow:hidden">'
     + '<div id="sb">'
     +   '<div id="sb-hdr">'
-    +     '<h1>Claude Sessions ' + (staticSessions ? '<span style="font-size:9px;color:var(--mut);border:1px solid var(--bdr);border-radius:4px;padding:2px 7px;vertical-align:middle">Static</span>' : '<button id="btn-refresh">&#8635; Refresh</button>') + '</h1>'
+    +     '<h1>AI Sessions ' + (staticSessions ? '<span style="font-size:9px;color:var(--mut);border:1px solid var(--bdr);border-radius:4px;padding:2px 7px;vertical-align:middle">Static</span>' : '<button id="btn-refresh">&#8635; Refresh</button>') + '</h1>'
     +     '<input id="search" type="text" placeholder="Search title or content…">'
     +     '<div id="date-filters">'
     +       '<input id="date-from" type="date" title="From date">'
@@ -537,11 +688,13 @@ const PRICING = {
   opus:    { in: 15,   out: 75,  cr: 1.50,  cc: 18.75 },
   sonnet:  { in: 3,    out: 15,  cr: 0.30,  cc: 3.75  },
   haiku:   { in: 0.80, out: 4,   cr: 0.08,  cc: 1.00  },
+  codex:   { in: 5,    out: 30,  cr: 2.50,  cc: 0     },
   default: { in: 3,    out: 15,  cr: 0.30,  cc: 3.75  },
 };
 
 function getPrice(model) {
   if (!model) return PRICING.default;
+  if (model === 'codex')        return PRICING.codex;
   if (model.includes('opus'))   return PRICING.opus;
   if (model.includes('haiku'))  return PRICING.haiku;
   if (model.includes('sonnet')) return PRICING.sonnet;
@@ -556,12 +709,9 @@ function calcCost(model, t) {
 
 // ── dashboard ─────────────────────────────────────────────────────────────────
 function buildDashboard(sessions) {
-  sessions.forEach(s => { s.cost = calcCost(s.model, s.totals); });
-
-  const totalCost = sessions.reduce((a, s) => a + s.cost, 0);
-  const totalOut  = sessions.reduce((a, s) => a + (s.totals ? s.totals.output : 0), 0);
-  const totalIn   = sessions.reduce((a, s) => a + (s.totals ? s.totals.input : 0), 0);
-  const totalCR   = sessions.reduce((a, s) => a + (s.totals ? s.totals.cacheRead : 0), 0);
+  sessions.forEach(s => {
+    s.cost = (s.provider !== 'gemini') ? calcCost(s.model, s.totals) : 0;
+  });
 
   const byDate = {};
   sessions.forEach(s => {
@@ -602,13 +752,11 @@ function buildDashboard(sessions) {
     const max = Math.max(...vals, 0.0001);
     const px = (i) => (OX + (i / Math.max(data.length-1,1)) * IW).toFixed(1);
     const py = (v) => (OY + IH - (v / max) * IH).toFixed(1);
-    // grid lines
     const grid = [0, 0.5, 1].map(f => {
       const y = (OY + IH - f * IH).toFixed(0);
       return '<line x1="' + OX + '" y1="' + y + '" x2="' + (OX+IW) + '" y2="' + y + '" stroke="#2a2a32" stroke-width="1"/>'
         + '<text x="' + (OX-4) + '" y="' + (Number(y)+3) + '" fill="#444" font-size="9" text-anchor="end">' + fmtCost(f*max) + '</text>';
     }).join('');
-    // area fill
     const ptsArr = data.map((d,i) => px(i)+','+py(d[1]));
     const areaPath = 'M '+px(0)+','+py(0)+' '+ptsArr.map((p,i)=>(i===0?'':p)).join(' ')+' L '+px(data.length-1)+','+(OY+IH)+' L '+OX+','+(OY+IH)+' Z';
     const line = '<polyline points="'+ptsArr.join(' ')+'" fill="none" stroke="#d97706" stroke-width="2"/>';
@@ -616,7 +764,6 @@ function buildDashboard(sessions) {
     const dots = data.map((d,i) =>
       '<circle cx="'+px(i)+'" cy="'+py(d[1])+'" r="3.5" fill="#d97706" stroke="#0f0f11" stroke-width="1.5"><title>'+d[0]+': '+fmtCost(d[1])+' ('+d[2]+' sessions)</title></circle>'
     ).join('');
-    // x labels: show up to 7 evenly
     const step = Math.max(1, Math.floor(data.length / 7));
     const xLabels = data.map((d,i) => {
       if (i % step !== 0 && i !== data.length-1) return '';
@@ -625,51 +772,18 @@ function buildDashboard(sessions) {
     return '<svg width="100%" viewBox="0 0 '+W+' '+H+'" style="overflow:visible">'+grid+area+line+dots+xLabels+'</svg>';
   }
 
-  // stacked mini bars: project cost
-  function projBars() {
-    const sorted = Object.entries(byProj).sort((a,b) => b[1].cost - a[1].cost);
-    const max = sorted[0] ? sorted[0][1].cost : 0.0001;
-    return sorted.map(([p, v]) => {
-      const pct = (v.cost / max * 100).toFixed(1);
-      return '<div style="margin-bottom:8px">'
-        + '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">'
-        + '<span style="color:#c4c4d0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px">' + esc(shortName(p)) + '</span>'
-        + '<span style="color:#6fcf6f;font-family:monospace;font-size:11px;flex-shrink:0;margin-left:8px">' + fmtCost(v.cost) + '</span>'
-        + '</div>'
-        + '<div style="background:#2a2a32;border-radius:3px;height:5px">'
-        + '<div style="background:#d97706;border-radius:3px;height:5px;width:' + pct + '%"></div>'
-        + '</div>'
-        + '<div style="font-size:10px;color:#444;margin-top:2px">' + v.count + ' sessions · out ' + fmtK(v.output) + '</div>'
-        + '</div>';
-    }).join('');
-  }
-
-  // model pills
-  function modelPills() {
-    const COLORS = { opus: '#9f7dff', sonnet: '#6fa8cf', haiku: '#6fcf6f' };
-    return Object.entries(byModel).sort((a,b) => b[1].cost - a[1].cost).map(([m, v]) => {
-      const key = m.includes('opus') ? 'opus' : m.includes('haiku') ? 'haiku' : 'sonnet';
-      const col = COLORS[key] || '#888';
-      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #2a2a32">'
-        + '<span style="width:8px;height:8px;border-radius:50%;background:' + col + ';flex-shrink:0"></span>'
-        + '<span style="flex:1;font-size:12px;color:#c4c4d0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m) + '</span>'
-        + '<span style="font-size:11px;color:#555">' + v.count + ' sess</span>'
-        + '<span style="font-size:11px;color:#6fcf6f;font-family:monospace;min-width:60px;text-align:right">' + fmtCost(v.cost) + '</span>'
-        + '</div>';
-    }).join('');
-  }
-
   // session rows JSON for client-side table
   const sessionData = JSON.stringify(sessions.map(s => ({
-    id:   s.id,
-    date: s.date,
+    id:    s.id,
+    date:  s.date,
     title: s.title,
-    proj: shortName(s.project || '(unknown)'),
+    proj:  shortName(s.project || '(unknown)'),
     model: s.model ? s.model.replace('claude-', '').replace(/-\d{8}$/, '') : '',
-    out: s.totals ? s.totals.output : 0,
-    inp: s.totals ? s.totals.input : 0,
-    cr: s.totals ? s.totals.cacheRead : 0,
-    cost: s.cost,
+    out:   s.totals ? s.totals.output : 0,
+    inp:   s.totals ? s.totals.input : 0,
+    cr:    s.totals ? s.totals.cacheRead : 0,
+    cost:  s.cost,
+    prov:  s.provider || 'claude',
   })));
 
   const projList = JSON.stringify(['All', ...Object.keys(byProj).sort().map(shortName)]);
@@ -677,7 +791,7 @@ function buildDashboard(sessions) {
   const lineSvgHtml = lineChart(dates.map(d => [d, byDate[d].cost, byDate[d].count]));
 
   const nav = '<nav style="height:38px;background:#111;border-bottom:1px solid #2e2e36;display:flex;align-items:center;padding:0 16px;gap:4px;flex-shrink:0">'
-    + '<span style="font-size:11px;font-weight:700;color:#d97706;letter-spacing:.08em;margin-right:12px">CLAUDE</span>'
+    + '<span style="font-size:11px;font-weight:700;color:#d97706;letter-spacing:.08em;margin-right:12px">AI SESSIONS</span>'
     + '<a href="/" style="padding:4px 12px;border-radius:5px;font-size:12px;text-decoration:none;color:#888896">Sessions</a>'
     + '<a href="/dashboard" style="padding:4px 12px;border-radius:5px;font-size:12px;text-decoration:none;background:#1a1a1f;color:#e2e2e8;border:1px solid #3a3a46">Dashboard</a>'
     + '</nav>';
@@ -697,7 +811,6 @@ function buildDashboard(sessions) {
     .top-row{display:grid;grid-template-columns:1fr 280px;gap:14px;margin-bottom:20px}
     .box{background:var(--sur);border:1px solid var(--bdr);border-radius:10px;padding:16px}
     .side-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
-    /* sessions table */
     .tbl-wrap{background:var(--sur);border:1px solid var(--bdr);border-radius:10px;overflow:hidden}
     .tbl-toolbar{padding:10px 14px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--bdr);flex-wrap:wrap}
     #tbl-search{background:#111;border:1px solid var(--bdr);border-radius:6px;padding:5px 10px;color:#e2e2e8;font-size:12px;width:200px;outline:none}
@@ -717,6 +830,8 @@ function buildDashboard(sessions) {
     .tag-opus{background:#2d2040;color:#9f7dff}
     .tag-sonnet{background:#1a2a3a;color:#6fa8cf}
     .tag-haiku{background:#1a2d1a;color:#6fcf6f}
+    .tag-codex{background:#0a2a0a;color:#4fc34f}
+    .tag-gemini{background:#0a1a2a;color:#4faed9}
     .tag-def{background:#2a2a2a;color:#888}
     .note{font-size:10px;color:#333;margin-top:14px}
     @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}.top-row,.side-row{grid-template-columns:1fr}}
@@ -732,6 +847,8 @@ function buildDashboard(sessions) {
     function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
     function modelTag(m){
+      if(m==='codex') return '<span class="model-tag tag-codex">codex</span>';
+      if(m==='gemini') return '<span class="model-tag tag-gemini">gemini</span>';
       var cls = m.includes('opus')?'tag-opus':m.includes('haiku')?'tag-haiku':m.includes('sonnet')?'tag-sonnet':'tag-def';
       var label = m.includes('opus')?'opus':m.includes('haiku')?'haiku':m.includes('sonnet')?'sonnet':m;
       return '<span class="model-tag '+cls+'">'+label+'</span>';
@@ -768,7 +885,7 @@ function buildDashboard(sessions) {
       var avg = count ? t.cost/count : 0;
       document.getElementById('dash-cards').innerHTML =
         card('Total Sessions', String(count), projCount+' projects', 'w') +
-        card('Est. Total Cost', fmtCost(t.cost), 'Anthropic pricing', 'g') +
+        card('Est. Cost', fmtCost(t.cost), 'Claude + Codex (GPT-5.5)', 'g') +
         card('Output Tokens', fmtK(t.out), 'input '+fmtK(t.inp), 'b') +
         card('Avg Cost / Session', fmtCost(avg), 'cache↓ '+fmtK(t.cr), 'y');
     }
@@ -810,12 +927,12 @@ function buildDashboard(sessions) {
     }
 
     function renderModels(byModel){
-      var COLORS={opus:'#9f7dff',sonnet:'#6fa8cf',haiku:'#6fcf6f'};
+      var COLORS={opus:'#9f7dff',sonnet:'#6fa8cf',haiku:'#6fcf6f',codex:'#4fc34f',gemini:'#4faed9'};
       var html=Object.entries(byModel).sort(function(a,b){return b[1].cost-a[1].cost;}).map(function(e){
         var m=e[0],v=e[1];
-        var key=m.includes('opus')?'opus':m.includes('haiku')?'haiku':'sonnet';
+        var col=COLORS[m]||(m.includes('opus')?COLORS.opus:m.includes('haiku')?COLORS.haiku:COLORS.sonnet);
         return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #2a2a32">'+
-          '<span style="width:8px;height:8px;border-radius:50%;background:'+(COLORS[key]||'#888')+';flex-shrink:0"></span>'+
+          '<span style="width:8px;height:8px;border-radius:50%;background:'+col+';flex-shrink:0"></span>'+
           '<span style="flex:1;font-size:12px;color:#c4c4d0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m)+'</span>'+
           '<span style="font-size:11px;color:#555">'+v.count+' sess</span>'+
           '<span style="font-size:11px;color:#6fcf6f;font-family:monospace;min-width:60px;text-align:right">'+fmtCost(v.cost)+'</span>'+
@@ -920,7 +1037,7 @@ function buildDashboard(sessions) {
 
   return '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">'
     + '<meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<title>Claude Dashboard</title>'
+    + '<title>AI Session Dashboard</title>'
     + '<style>' + css + '</style></head><body>'
     + nav
     + '<div class="page">'
@@ -935,19 +1052,13 @@ function buildDashboard(sessions) {
     + '<span id="dash-period-lbl" style="font-size:11px;color:#555560;margin-left:auto"></span>'
     + '</div>'
 
-    // stat cards (dynamic)
     + '<div class="cards" id="dash-cards"></div>'
-
-    // chart row (dynamic)
     + '<div class="top-row">'
-    + '<div class="box"><div class="sec-title">Daily Cost</div><div id="dash-chart"></div></div>'
+    + '<div class="box"><div class="sec-title">Daily Cost (Claude)</div><div id="dash-chart"></div></div>'
     + '<div class="box"><div class="sec-title">By Model</div><div id="dash-models"></div></div>'
     + '</div>'
-
-    // project bars (dynamic)
     + '<div class="box" style="margin-bottom:20px"><div class="sec-title">By Project</div><div id="dash-proj"></div></div>'
 
-    // sessions table
     + '<div class="tbl-wrap">'
     + '<div class="tbl-toolbar">'
     + '<div class="sec-title" style="margin:0">All Sessions</div>'
@@ -957,20 +1068,20 @@ function buildDashboard(sessions) {
     + '</div>'
     + '<div class="tbl-scroll"><table>'
     + '<thead><tr>'
-    + '<th data-col="date">Date<span class="arr">▼</span></th>'
-    + '<th data-col="title">Title<span class="arr">▼</span></th>'
-    + '<th data-col="proj">Project<span class="arr">▼</span></th>'
-    + '<th data-col="model">Model<span class="arr">▼</span></th>'
-    + '<th data-col="out" style="text-align:right">Out<span class="arr">▼</span></th>'
-    + '<th data-col="inp" style="text-align:right">In<span class="arr">▼</span></th>'
-    + '<th data-col="cr" style="text-align:right">Cache↓<span class="arr">▼</span></th>'
-    + '<th data-col="cost" style="text-align:right">Est. Cost<span class="arr">▼</span></th>'
+    + '<th data-col="date">Date<span class="arr">&#9660;</span></th>'
+    + '<th data-col="title">Title<span class="arr">&#9660;</span></th>'
+    + '<th data-col="proj">Project<span class="arr">&#9660;</span></th>'
+    + '<th data-col="model">Model<span class="arr">&#9660;</span></th>'
+    + '<th data-col="out" style="text-align:right">Out<span class="arr">&#9660;</span></th>'
+    + '<th data-col="inp" style="text-align:right">In<span class="arr">&#9660;</span></th>'
+    + '<th data-col="cr" style="text-align:right">Cache&#8595;<span class="arr">&#9660;</span></th>'
+    + '<th data-col="cost" style="text-align:right">Est. Cost<span class="arr">&#9660;</span></th>'
     + '</tr></thead>'
     + '<tbody id="sess-tbody"></tbody>'
     + '</table></div>'
     + '</div>'
 
-    + '<p class="note">* Pricing: sonnet $3/$15, opus $15/$75, haiku $0.80/$4 (in/out per MTok). Cache read $0.30/$1.50/$0.08. Not actual billed amounts.</p>'
+    + '<p class="note">* Cost: Claude (sonnet $3/$15, opus $15/$75, haiku $0.80/$4 per MTok) + Codex GPT-5.5 ($5/$30 per MTok). Gemini cost not available (no token data).</p>'
     + '</div>'
     + '<script>' + js + '</script>'
     + '</body></html>';
@@ -1010,7 +1121,9 @@ const server = http.createServer((req, res) => {
 // ── static mode ──────────────────────────────────────────────────────────────
 if (args.includes('--static')) {
   const sessions = loadAllSessions();
-  sessions.forEach(s => { s.cost = calcCost(s.model, s.totals); });
+  sessions.forEach(s => {
+    s.cost = (s.provider !== 'gemini') ? calcCost(s.model, s.totals) : 0;
+  });
   const html = buildHtml(sessions);
   const out = path.join(os.tmpdir(), 'claude-session-viewer.html');
   fs.writeFileSync(out, html, 'utf8');
@@ -1022,8 +1135,10 @@ if (args.includes('--static')) {
 
 function onListen() {
   const url = 'http://localhost:' + PORT;
-  console.log('Claude Session Viewer: ' + url);
-  console.log('Reading from: ' + BASE);
+  console.log('AI Session Viewer: ' + url);
+  console.log('Claude: ' + BASE);
+  console.log('Codex:  ' + path.join(os.homedir(), '.codex', 'sessions'));
+  console.log('Gemini: ' + path.join(os.homedir(), '.gemini', 'antigravity', 'brain'));
   console.log('Ctrl+C to stop.\n');
   if (!NO_OPEN) {
     const cmd = process.platform === 'win32' ? 'start' : process.platform === 'darwin' ? 'open' : 'xdg-open';
