@@ -34,13 +34,30 @@ function extractUser(content) {
   return '';
 }
 
+function getToolDetail(name, input) {
+  if (!input) return '';
+  const n = name.toLowerCase();
+  if (n === 'bash')  return input.command ? input.command.slice(0, 400) : '';
+  if (n === 'read')  return input.file_path || '';
+  if (n === 'write') return input.file_path || '';
+  if (n === 'edit')  return (input.file_path || '')
+    + (input.old_string ? '\n- ' + input.old_string.slice(0, 120) + '\n+ ' + (input.new_string || '').slice(0, 120) : '');
+  if (n === 'grep')  return (input.pattern || '') + (input.path ? '  [' + input.path + ']' : '');
+  if (n === 'glob')  return (input.pattern || '') + (input.path ? '  in ' + input.path : '');
+  const first = Object.values(input).find(v => typeof v === 'string');
+  return first ? first.slice(0, 150) : '';
+}
+
 function extractAssistant(content) {
   if (!Array.isArray(content)) {
     return typeof content === 'string' ? content.trim() : '';
   }
   return content.map(c => {
     if (c.type === 'text')     return c.text ? c.text.trim() : '';
-    if (c.type === 'tool_use') return '[Tool: ' + c.name + ']';
+    if (c.type === 'tool_use') {
+      const detail = getToolDetail(c.name, c.input);
+      return '[Tool: ' + c.name + (detail ? '\n' + detail : '') + ']';
+    }
     return '';
   }).filter(Boolean).join('\n\n');
 }
@@ -63,8 +80,21 @@ function parseSession(filePath) {
     try { d = JSON.parse(line); } catch { continue; }
     if (d.type === 'ai-title' && d.aiTitle) title = d.aiTitle;
     if (d.type === 'user') {
-      const text = extractUser(d.message && d.message.content);
-      if (text) messages.push({ role: 'user', text, tok: null });
+      const content = d.message && d.message.content;
+      if (Array.isArray(content)) {
+        const textParts = content.filter(c => c.type === 'text' && c.text)
+          .map(c => cleanText(c.text)).filter(Boolean);
+        if (textParts.length) messages.push({ role: 'user', text: textParts.join('\n\n'), tok: null });
+        for (const c of content) {
+          if (c.type !== 'tool_result') continue;
+          const res = typeof c.content === 'string' ? c.content
+            : Array.isArray(c.content) ? c.content.filter(x => x.type === 'text').map(x => x.text).join('\n') : '';
+          if (res.trim()) messages.push({ role: 'tool_result', text: res.trim(), tok: null });
+        }
+      } else {
+        const text = extractUser(content);
+        if (text) messages.push({ role: 'user', text, tok: null });
+      }
     }
     if (d.type === 'assistant') {
       const text = extractAssistant(d.message && d.message.content);
@@ -91,7 +121,7 @@ function parseSession(filePath) {
   return {
     id:      path.basename(filePath, '.jsonl'),
     title:   title || '(no title)',
-    date:    mtime.toISOString().slice(0, 16).replace('T', ' '),
+    date:    mtime.toLocaleString('sv-SE', { hour12: false }).slice(0, 16),
     project: path.basename(path.dirname(filePath)),
     model,
     totals,
@@ -120,7 +150,7 @@ function loadAllSessions() {
 }
 
 // ── HTML (no template-literal interpolation issues) ───────────────────────────
-function buildHtml() {
+function buildHtml(staticSessions) {
   const css = [
     '*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}',
     ':root{',
@@ -140,6 +170,11 @@ function buildHtml() {
     '#sb-hdr h1{font-size:11px;font-weight:700;color:var(--acc);letter-spacing:.08em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}',
     '#btn-refresh{padding:2px 8px;background:transparent;border:1px solid var(--bdr);border-radius:4px;color:var(--mut);font-size:10px;cursor:pointer}',
     '#btn-refresh:hover{border-color:var(--acc);color:var(--acc)}',
+    '#btn-sort{padding:2px 8px;background:transparent;border:1px solid var(--bdr);border-radius:4px;color:var(--mut);font-size:10px;cursor:pointer}',
+    '#btn-sort:hover{border-color:var(--acc);color:var(--acc)}',
+    '#date-from,#date-to{width:100%;padding:4px 6px;background:var(--sur2);border:1px solid var(--bdr);border-radius:5px;color:var(--txt);font-size:11px;outline:none;color-scheme:dark}',
+    '#date-from:focus,#date-to:focus{border-color:var(--acc)}',
+    '#date-filters{display:flex;gap:6px;align-items:center}',
     '#search{width:100%;padding:6px 10px;background:var(--sur2);border:1px solid var(--bdr);border-radius:6px;color:var(--txt);font-size:13px;outline:none}',
     '#search:focus{border-color:var(--acc)}',
     '#search::placeholder{color:var(--mut)}',
@@ -162,7 +197,7 @@ function buildHtml() {
     '.pt-si:hover{background:var(--sur2);color:var(--txt)}',
     '.pt-si.active{color:var(--acc);background:var(--sur2)}',
     // session list
-    '#list-hdr{padding:5px 14px;font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--bdr);flex-shrink:0}',
+    '#list-hdr{padding:5px 14px;font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--bdr);flex-shrink:0;display:flex;justify-content:space-between;align-items:center}',
     '#slist{flex:1;overflow-y:auto;padding:4px 6px}',
     '#slist::-webkit-scrollbar{width:4px}',
     '#slist::-webkit-scrollbar-thumb{background:var(--scr);border-radius:2px}',
@@ -174,6 +209,7 @@ function buildHtml() {
     '.si-cnt{background:var(--bdr);padding:1px 5px;border-radius:10px;font-size:10px;flex-shrink:0}',
     '.si-ptag{font-size:10px;color:var(--acc);opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     '.si-tok{font-size:10px;color:var(--mut);margin-top:1px}',
+    '.si-cost{font-size:10px;color:#6fcf6f;font-family:monospace;flex-shrink:0}',
     // main
     '#main{flex:1;display:flex;flex-direction:column;overflow:hidden}',
     '#cv-hdr{padding:11px 18px;border-bottom:1px solid var(--bdr);background:var(--sur);display:flex;align-items:center;gap:10px}',
@@ -199,6 +235,9 @@ function buildHtml() {
     '.av{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;margin-top:3px}',
     '.msg.user .av{background:var(--ubd);color:#aac4ff}',
     '.msg.assistant .av{background:var(--abd);color:#86c994}',
+    '.msg.tool_result{align-self:flex-start}',
+    '.msg.tool_result .av{background:#1a1a2e;color:#8888cc;font-size:9px}',
+    '.msg.tool_result .bubble{background:#0d1117;border-color:#2a2a3a;border-top-left-radius:3px;max-height:260px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.5;padding:8px 12px}',
     '.bubble{padding:11px 15px;border-radius:12px;max-width:700px;word-break:break-word;font-size:13.5px;line-height:1.75;border:1px solid transparent;white-space:pre-wrap}',
     '.msg.user .bubble{background:var(--ubg);border-color:var(--ubd);border-top-right-radius:3px}',
     '.msg.assistant .bubble{background:var(--abg);border-color:var(--abd);border-top-left-radius:3px}',
@@ -210,7 +249,7 @@ function buildHtml() {
 
   // client-side JS — written as a plain string, no template literal tricks
   const js = [
-    'var S=[], showTools=false, curIdx=null, activePrj=null, searchQ="";',
+    'var S=[], showTools=false, curIdx=null, activePrj=null, searchQ="", sortDir="desc";',
     'var GROUPS={};',
     '',
     'async function load(){',
@@ -287,12 +326,22 @@ function buildHtml() {
     '',
     'function applyFilter(){',
     '  var lo=searchQ.toLowerCase();',
+    '  var df=document.getElementById("date-from").value;',
+    '  var dt=document.getElementById("date-to").value;',
     '  var list=S.filter(function(s){',
     '    var mp=activePrj===null||s.project===activePrj;',
     '    var mq=!lo||s.title.toLowerCase().includes(lo)||s.msgs.some(function(m){return m.text.toLowerCase().includes(lo);});',
-    '    return mp&&mq;',
+    '    var d=s.date.slice(0,10);',
+    '    var mdf=!df||d>=df;',
+    '    var mdt=!dt||d<=dt;',
+    '    return mp&&mq&&mdf&&mdt;',
     '  });',
     '  renderList(list);',
+    '}',
+    '',
+    'function toggleSort(){',
+    '  sortDir=sortDir==="desc"?"asc":"desc";',
+    '  applyFilter();',
     '}',
     '',
     'function fmtK(n){',
@@ -300,21 +349,45 @@ function buildHtml() {
     '  return n>=1000?(n/1000).toFixed(1)+"k":String(n);',
     '}',
     '',
+    'var PRICING={',
+    '  opus:{i:15,o:75,cr:1.50,cc:18.75},',
+    '  sonnet:{i:3,o:15,cr:0.30,cc:3.75},',
+    '  haiku:{i:0.80,o:4,cr:0.08,cc:1.00},',
+    '  def:{i:3,o:15,cr:0.30,cc:3.75}',
+    '};',
+    'function calcCost(model,t){',
+    '  if(!t) return 0;',
+    '  var k=model?(model.indexOf("opus")>=0?"opus":model.indexOf("haiku")>=0?"haiku":"sonnet"):"def";',
+    '  var p=PRICING[k]||PRICING.def;',
+    '  return(t.input*p.i+t.output*p.o+(t.cacheRead||0)*p.cr+(t.cacheCreate||0)*p.cc)/1e6;',
+    '}',
+    'function fmtCost(c){',
+    '  if(!c) return "";',
+    '  return "$"+(c<0.001?c.toFixed(5):c<0.01?c.toFixed(4):c<1?c.toFixed(3):c.toFixed(2));',
+    '}',
+    '',
     'function renderList(list){',
+    '  var sorted=list.slice();',
+    '  if(sortDir==="asc") sorted.sort(function(a,b){return a.date.localeCompare(b.date);});',
+    '  else sorted.sort(function(a,b){return b.date.localeCompare(a.date);});',
     '  var lbl=activePrj?shortName(activePrj):"All Projects";',
-    '  document.getElementById("list-hdr").textContent=list.length+" sessions — "+lbl;',
+    '  document.getElementById("list-hdr-lbl").textContent=sorted.length+" sessions — "+lbl;',
+    '  var btn=document.getElementById("btn-sort");',
+    '  if(btn) btn.textContent=sortDir==="desc"?"↓ Newest":"↑ Oldest";',
     '  var el=document.getElementById("slist");',
-    '  el.innerHTML=list.map(function(s){',
+    '  el.innerHTML=sorted.map(function(s){',
     '    var ri=S.indexOf(s);',
     '    var t=s.msgs.filter(function(m){return m.role==="user";}).length;',
+    '    var cost=calcCost(s.model,s.totals);',
+    '    var costStr=cost?"<span class=\\"si-cost\\">"+fmtCost(cost)+"</span>":"";',
     '    var tokStr="";',
     '    if(s.totals&&(s.totals.output||s.totals.input)){',
-    '      tokStr="<div class=\\"si-tok\\">out "+fmtK(s.totals.output)+" · in "+fmtK(s.totals.input)',
-    '        +(s.totals.cacheRead?" · cache&#8595; "+fmtK(s.totals.cacheRead):"")+"</div>";',
+    '      tokStr="<div class=\\"si-tok\\">out "+fmtK(s.totals.output)+" \xB7 in "+fmtK(s.totals.input)',
+    '        +(s.totals.cacheRead?" \xB7 cache&#8595; "+fmtK(s.totals.cacheRead):"")+"</div>";',
     '    }',
     '    return "<div class=\\"si"+(ri===curIdx?" active":"")+"\\\" id=\\"si"+ri+"\\" data-idx=\\""+ri+"\\">"+',
     '      "<div class=\\"si-ttl\\">"+esc(s.title)+"</div>"+',
-    '      "<div class=\\"si-meta\\"><span>"+s.date+"</span><span class=\\"si-cnt\\">"+t+"t</span></div>"+',
+    '      "<div class=\\"si-meta\\"><span>"+s.date+"</span><span class=\\"si-cnt\\">"+t+"t</span>"+costStr+"</div>"+',
     '      tokStr+',
     '      (activePrj===null?"<div class=\\"si-ptag\\">"+esc(shortName(s.project))+"</div>":"")+',
     '      "</div>";',
@@ -329,7 +402,9 @@ function buildHtml() {
     'document.getElementById("search").addEventListener("input",function(e){',
     '  searchQ=e.target.value; applyFilter();',
     '});',
-    'document.getElementById("btn-refresh").addEventListener("click",load);',
+    'document.getElementById("date-from").addEventListener("change",function(){applyFilter();});',
+    'document.getElementById("date-to").addEventListener("change",function(){applyFilter();});',
+    'var rbtn=document.getElementById("btn-refresh"); if(rbtn) rbtn.addEventListener("click",load);',
     'document.getElementById("btn-tools").addEventListener("click",function(){',
     '  showTools=!showTools;',
     '  document.getElementById("btn-tools").textContent=showTools?"Tools ON":"Tools OFF";',
@@ -367,16 +442,23 @@ function buildHtml() {
     '  var vis=msgs.filter(function(m){return m.text.trim();});',
     '  if(!vis.length){el.innerHTML="<div id=\\"empty\\"><p>No messages</p></div>";return;}',
     '  vis.forEach(function(m){',
-    '    var isTool=m.text.indexOf("[Tool:")===0&&m.text.trim().slice(-1)==="]";',
-    '    if(isTool&&!showTools) return;',
+    '    var isResult=m.role==="tool_result";',
+    '    var isCall=!isResult&&m.text.indexOf("[Tool:")===0&&m.text.trim().slice(-1)==="]";',
+    '    if((isResult||isCall)&&!showTools) return;',
     '    var row=document.createElement("div");',
-    '    row.className="msg "+m.role;',
+    '    row.className="msg "+(isResult?"tool_result":m.role);',
     '    var av=document.createElement("div");',
     '    av.className="av";',
-    '    av.textContent=m.role==="user"?"U":"AI";',
+    '    av.textContent=m.role==="user"?"U":isResult?"TR":"AI";',
     '    var b=document.createElement("div");',
     '    b.className="bubble";',
-    '    b.innerHTML=isTool?"<span class=\\"tool-chip\\">"+esc(m.text)+"</span>":fmt(m.text);',
+    '    if(isResult){',
+    '      b.innerHTML="<pre style=\\"margin:0;white-space:pre-wrap;word-break:break-all\\">"+esc(m.text)+"</pre>";',
+    '    } else if(isCall){',
+    '      b.innerHTML="<span class=\\"tool-chip\\" style=\\"white-space:pre-wrap\\">"+esc(m.text)+"</span>";',
+    '    } else {',
+    '      b.innerHTML=fmt(m.text);',
+    '    }',
     '    if(m.role==="assistant"&&m.tok&&m.tok.out){',
     '      var tk=document.createElement("div");',
     '      tk.className="msg-tok";',
@@ -398,7 +480,9 @@ function buildHtml() {
     '  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");',
     '}',
     '',
-    'load();',
+    staticSessions
+      ? 'S=' + JSON.stringify(staticSessions) + '; buildTree(); applyFilter(); if(S.length) pick(0); document.getElementById("overlay").style.display="none";'
+      : 'load();',
   ].join('\n');
 
   const nav = '<nav style="height:38px;background:#111;border-bottom:1px solid #2e2e36;display:flex;align-items:center;padding:0 16px;gap:4px;flex-shrink:0">'
@@ -417,11 +501,19 @@ function buildHtml() {
     + '<div id="app" style="flex:1;overflow:hidden">'
     + '<div id="sb">'
     +   '<div id="sb-hdr">'
-    +     '<h1>Claude Sessions <button id="btn-refresh">&#8635; Refresh</button></h1>'
+    +     '<h1>Claude Sessions ' + (staticSessions ? '<span style="font-size:9px;color:var(--mut);border:1px solid var(--bdr);border-radius:4px;padding:2px 7px;vertical-align:middle">Static</span>' : '<button id="btn-refresh">&#8635; Refresh</button>') + '</h1>'
     +     '<input id="search" type="text" placeholder="Search title or content…">'
+    +     '<div id="date-filters">'
+    +       '<input id="date-from" type="date" title="From date">'
+    +       '<span style="color:var(--mut);font-size:11px">&#8594;</span>'
+    +       '<input id="date-to" type="date" title="To date">'
+    +     '</div>'
     +   '</div>'
     +   '<div id="ptree"></div>'
-    +   '<div id="list-hdr">—</div>'
+    +   '<div id="list-hdr">'
+    +     '<span id="list-hdr-lbl">—</span>'
+    +     '<button id="btn-sort" onclick="toggleSort()">↓ Newest</button>'
+    +   '</div>'
     +   '<div id="slist"></div>'
     + '</div>'
     + '<div id="main">'
@@ -570,7 +662,7 @@ function buildDashboard(sessions) {
   // session rows JSON for client-side table
   const sessionData = JSON.stringify(sessions.map(s => ({
     id:   s.id,
-    date: s.date.slice(0, 10),
+    date: s.date,
     title: s.title,
     proj: shortName(s.project || '(unknown)'),
     model: s.model ? s.model.replace('claude-', '').replace(/-\d{8}$/, '') : '',
@@ -641,24 +733,130 @@ function buildDashboard(sessions) {
 
     function modelTag(m){
       var cls = m.includes('opus')?'tag-opus':m.includes('haiku')?'tag-haiku':m.includes('sonnet')?'tag-sonnet':'tag-def';
-      var short = m.replace('claude-','').replace('claude','');
-      var label = m.includes('opus')?'opus':m.includes('haiku')?'haiku':m.includes('sonnet')?'sonnet':short;
+      var label = m.includes('opus')?'opus':m.includes('haiku')?'haiku':m.includes('sonnet')?'sonnet':m;
       return '<span class="model-tag '+cls+'">'+label+'</span>';
     }
 
-    function render(){
-      var rows = SESSIONS.filter(function(s){
-        var mq = !filterQ || s.title.toLowerCase().includes(filterQ) || s.proj.toLowerCase().includes(filterQ);
-        var mp = filterProj==='All' || s.proj===filterProj;
-        return mq && mp;
+    function getDateFiltered(){
+      var df = document.getElementById('dash-date-from').value;
+      var dt = document.getElementById('dash-date-to').value;
+      return SESSIONS.filter(function(s){
+        var d = s.date.slice(0,10);
+        return (!df||d>=df) && (!dt||d<=dt);
+      });
+    }
+
+    function aggregate(rows){
+      var t = {cost:0,out:0,inp:0,cr:0};
+      var byDate={}, byProj={}, byModel={};
+      rows.forEach(function(s){
+        t.cost+=s.cost; t.out+=s.out; t.inp+=s.inp; t.cr+=s.cr;
+        var d=s.date.slice(0,10);
+        if(!byDate[d]) byDate[d]={cost:0,count:0};
+        byDate[d].cost+=s.cost; byDate[d].count++;
+        if(!byProj[s.proj]) byProj[s.proj]={cost:0,output:0,count:0};
+        byProj[s.proj].cost+=s.cost; byProj[s.proj].output+=s.out; byProj[s.proj].count++;
+        var m=s.model||'(unknown)';
+        if(!byModel[m]) byModel[m]={cost:0,output:0,count:0};
+        byModel[m].cost+=s.cost; byModel[m].output+=s.out; byModel[m].count++;
+      });
+      return {t:t, byDate:byDate, byProj:byProj, byModel:byModel, projCount:Object.keys(byProj).length};
+    }
+
+    function renderCards(t, count, projCount){
+      function card(lbl,val,sub,cls){ return '<div class="card"><div class="card-label">'+lbl+'</div><div class="card-val '+cls+'">'+val+'</div><div class="card-sub">'+sub+'</div></div>'; }
+      var avg = count ? t.cost/count : 0;
+      document.getElementById('dash-cards').innerHTML =
+        card('Total Sessions', String(count), projCount+' projects', 'w') +
+        card('Est. Total Cost', fmtCost(t.cost), 'Anthropic pricing', 'g') +
+        card('Output Tokens', fmtK(t.out), 'input '+fmtK(t.inp), 'b') +
+        card('Avg Cost / Session', fmtCost(avg), 'cache↓ '+fmtK(t.cr), 'y');
+    }
+
+    function lineChartSvg(data){
+      if(!data.length) return '<p style="color:#555;font-size:12px;padding:20px 0">No data</p>';
+      var W=580,H=110,OX=46,OY=8,IW=W-OX-8,IH=H-OY-16;
+      var vals=data.map(function(d){return d[1];});
+      var max=Math.max.apply(null,vals.concat([0.0001]));
+      function px(i){return (OX+(i/Math.max(data.length-1,1))*IW).toFixed(1);}
+      function py(v){return (OY+IH-(v/max)*IH).toFixed(1);}
+      var grid=[0,0.5,1].map(function(f){
+        var y=(OY+IH-f*IH).toFixed(0);
+        return '<line x1="'+OX+'" y1="'+y+'" x2="'+(OX+IW)+'" y2="'+y+'" stroke="#2a2a32" stroke-width="1"/>'+
+          '<text x="'+(OX-4)+'" y="'+(Number(y)+3)+'" fill="#444" font-size="9" text-anchor="end">'+fmtCost(f*max)+'</text>';
+      }).join('');
+      var ptsArr=data.map(function(d,i){return px(i)+','+py(d[1]);});
+      var areaPath='M '+px(0)+','+py(data[0][1])+' '+ptsArr.slice(1).join(' ')+
+        ' L '+px(data.length-1)+','+(OY+IH)+' L '+OX+','+(OY+IH)+' Z';
+      var dots=data.map(function(d,i){
+        return '<circle cx="'+px(i)+'" cy="'+py(d[1])+'" r="3.5" fill="#d97706" stroke="#0f0f11" stroke-width="1.5">'+
+          '<title>'+d[0]+': '+fmtCost(d[1])+' ('+d[2]+' sessions)</title></circle>';
+      }).join('');
+      var step=Math.max(1,Math.floor(data.length/7));
+      var xLabels=data.map(function(d,i){
+        if(i%step!==0&&i!==data.length-1) return '';
+        return '<text x="'+px(i)+'" y="'+(OY+IH+13)+'" fill="#444" font-size="9" text-anchor="middle">'+d[0].slice(5)+'</text>';
+      }).join('');
+      return '<svg width="100%" viewBox="0 0 '+W+' '+H+'" style="overflow:visible">'+grid+
+        '<path d="'+areaPath+'" fill="#d97706" opacity="0.08"/>'+
+        '<polyline points="'+ptsArr.join(' ')+'" fill="none" stroke="#d97706" stroke-width="2"/>'+
+        dots+xLabels+'</svg>';
+    }
+
+    function renderChart(byDate){
+      var dates=Object.keys(byDate).sort();
+      document.getElementById('dash-chart').innerHTML =
+        lineChartSvg(dates.map(function(d){return [d,byDate[d].cost,byDate[d].count];}));
+    }
+
+    function renderModels(byModel){
+      var COLORS={opus:'#9f7dff',sonnet:'#6fa8cf',haiku:'#6fcf6f'};
+      var html=Object.entries(byModel).sort(function(a,b){return b[1].cost-a[1].cost;}).map(function(e){
+        var m=e[0],v=e[1];
+        var key=m.includes('opus')?'opus':m.includes('haiku')?'haiku':'sonnet';
+        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #2a2a32">'+
+          '<span style="width:8px;height:8px;border-radius:50%;background:'+(COLORS[key]||'#888')+';flex-shrink:0"></span>'+
+          '<span style="flex:1;font-size:12px;color:#c4c4d0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m)+'</span>'+
+          '<span style="font-size:11px;color:#555">'+v.count+' sess</span>'+
+          '<span style="font-size:11px;color:#6fcf6f;font-family:monospace;min-width:60px;text-align:right">'+fmtCost(v.cost)+'</span>'+
+          '</div>';
+      }).join('');
+      document.getElementById('dash-models').innerHTML = html||'<p style="color:#555;font-size:12px">No data</p>';
+    }
+
+    function renderProj(byProj){
+      var sorted=Object.entries(byProj).sort(function(a,b){return b[1].cost-a[1].cost;});
+      var max=sorted[0]?sorted[0][1].cost:0.0001;
+      var html=sorted.map(function(e){
+        var p=e[0],v=e[1];
+        var pct=(v.cost/max*100).toFixed(1);
+        return '<div style="margin-bottom:8px">'+
+          '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">'+
+          '<span style="color:#c4c4d0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px">'+esc(p)+'</span>'+
+          '<span style="color:#6fcf6f;font-family:monospace;font-size:11px;flex-shrink:0;margin-left:8px">'+fmtCost(v.cost)+'</span>'+
+          '</div>'+
+          '<div style="background:#2a2a32;border-radius:3px;height:5px">'+
+          '<div style="background:#d97706;border-radius:3px;height:5px;width:'+pct+'%"></div>'+
+          '</div>'+
+          '<div style="font-size:10px;color:#444;margin-top:2px">'+v.count+' sessions \xB7 out '+fmtK(v.output)+'</div>'+
+          '</div>';
+      }).join('');
+      document.getElementById('dash-proj').innerHTML = html||'<p style="color:#555;font-size:12px">No data</p>';
+    }
+
+    function renderTable(filtered){
+      var rows=filtered.filter(function(s){
+        var mq=!filterQ||s.title.toLowerCase().includes(filterQ)||s.proj.toLowerCase().includes(filterQ);
+        var mp=filterProj==='All'||s.proj===filterProj;
+        return mq&&mp;
       });
       rows.sort(function(a,b){
-        var av = a[sortCol], bv = b[sortCol];
-        if(typeof av==='string') return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-        return sortAsc ? av-bv : bv-av;
+        var av=a[sortCol],bv=b[sortCol];
+        if(typeof av==='string') return sortAsc?av.localeCompare(bv):bv.localeCompare(av);
+        return sortAsc?av-bv:bv-av;
       });
-      document.getElementById('tbl-count').textContent = rows.length + ' / ' + SESSIONS.length + ' sessions';
-      var html = rows.map(function(s){
+      document.getElementById('tbl-count').textContent = rows.length+' / '+filtered.length+' sessions';
+      document.getElementById('sess-tbody').innerHTML = rows.map(function(s){
         return '<tr style="cursor:pointer" data-sid="'+esc(s.id)+'">'
           +'<td>'+esc(s.date)+'</td>'
           +'<td title="'+esc(s.title)+'" style="max-width:260px">'+esc(s.title)+'</td>'
@@ -670,8 +868,23 @@ function buildDashboard(sessions) {
           +'<td class="cost-cell">'+fmtCost(s.cost)+'</td>'
           +'</tr>';
       }).join('');
-      document.getElementById('sess-tbody').innerHTML = html;
     }
+
+    function applyFilter(){
+      var filtered = getDateFiltered();
+      var agg = aggregate(filtered);
+      renderCards(agg.t, filtered.length, agg.projCount);
+      renderChart(agg.byDate);
+      renderModels(agg.byModel);
+      renderProj(agg.byProj);
+      renderTable(filtered);
+      var df=document.getElementById('dash-date-from').value;
+      var dt=document.getElementById('dash-date-to').value;
+      document.getElementById('dash-period-lbl').textContent =
+        (df||dt) ? (df||'…')+' → '+(dt||'…')+' \xB7 '+filtered.length+' sessions' : 'All time \xB7 '+filtered.length+' sessions';
+    }
+
+    function render(){ renderTable(getDateFiltered()); }
 
     function setSortCol(col){
       if(sortCol===col) sortAsc=!sortAsc; else { sortCol=col; sortAsc=false; }
@@ -683,7 +896,6 @@ function buildDashboard(sessions) {
       render();
     }
 
-    // build project select
     var sel = document.getElementById('tbl-proj');
     PROJECTS.forEach(function(p){ var o=document.createElement('option'); o.value=p; o.textContent=p; sel.appendChild(o); });
 
@@ -696,7 +908,14 @@ function buildDashboard(sessions) {
       var tr = e.target.closest('tr[data-sid]');
       if(tr) window.location.href = '/?sid=' + encodeURIComponent(tr.dataset.sid);
     });
-    render();
+    document.getElementById('dash-date-from').addEventListener('change', applyFilter);
+    document.getElementById('dash-date-to').addEventListener('change', applyFilter);
+    document.getElementById('btn-clear-date').addEventListener('click', function(){
+      document.getElementById('dash-date-from').value='';
+      document.getElementById('dash-date-to').value='';
+      applyFilter();
+    });
+    applyFilter();
   `;
 
   return '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">'
@@ -706,22 +925,27 @@ function buildDashboard(sessions) {
     + nav
     + '<div class="page">'
 
-    // stat cards
-    + '<div class="cards">'
-    + '<div class="card"><div class="card-label">Total Sessions</div><div class="card-val w">' + sessions.length + '</div><div class="card-sub">' + Object.keys(byProj).length + ' projects</div></div>'
-    + '<div class="card"><div class="card-label">Est. Total Cost</div><div class="card-val g">' + fmtCost(totalCost) + '</div><div class="card-sub">Anthropic pricing</div></div>'
-    + '<div class="card"><div class="card-label">Output Tokens</div><div class="card-val b">' + fmtK(totalOut) + '</div><div class="card-sub">input ' + fmtK(totalIn) + '</div></div>'
-    + '<div class="card"><div class="card-label">Avg Cost / Session</div><div class="card-val y">' + fmtCost(totalCost / Math.max(sessions.length, 1)) + '</div><div class="card-sub">cache↓ ' + fmtK(totalCR) + '</div></div>'
+    // date filter bar
+    + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;background:#1a1a1f;border:1px solid #2e2e36;border-radius:8px;padding:10px 14px">'
+    + '<span style="font-size:10px;font-weight:700;color:#d97706;text-transform:uppercase;letter-spacing:.08em;margin-right:4px">Period</span>'
+    + '<input id="dash-date-from" type="date" style="padding:4px 8px;background:#111;border:1px solid #2e2e36;border-radius:5px;color:#e2e2e8;font-size:12px;outline:none;color-scheme:dark">'
+    + '<span style="color:#555560;font-size:12px">&#8594;</span>'
+    + '<input id="dash-date-to" type="date" style="padding:4px 8px;background:#111;border:1px solid #2e2e36;border-radius:5px;color:#e2e2e8;font-size:12px;outline:none;color-scheme:dark">'
+    + '<button id="btn-clear-date" style="padding:3px 10px;background:transparent;border:1px solid #2e2e36;border-radius:5px;color:#555560;font-size:11px;cursor:pointer;margin-left:4px">Clear</button>'
+    + '<span id="dash-period-lbl" style="font-size:11px;color:#555560;margin-left:auto"></span>'
     + '</div>'
 
-    // chart row
+    // stat cards (dynamic)
+    + '<div class="cards" id="dash-cards"></div>'
+
+    // chart row (dynamic)
     + '<div class="top-row">'
-    + '<div class="box"><div class="sec-title">Daily Cost</div>' + lineSvgHtml + '</div>'
-    + '<div class="box"><div class="sec-title">By Model</div>' + modelPills() + '</div>'
+    + '<div class="box"><div class="sec-title">Daily Cost</div><div id="dash-chart"></div></div>'
+    + '<div class="box"><div class="sec-title">By Model</div><div id="dash-models"></div></div>'
     + '</div>'
 
-    // project bars
-    + '<div class="box" style="margin-bottom:20px"><div class="sec-title">By Project</div>' + projBars() + '</div>'
+    // project bars (dynamic)
+    + '<div class="box" style="margin-bottom:20px"><div class="sec-title">By Project</div><div id="dash-proj"></div></div>'
 
     // sessions table
     + '<div class="tbl-wrap">'
@@ -783,16 +1007,20 @@ const server = http.createServer((req, res) => {
   res.end(buildHtml());
 });
 
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') {
-    console.error('Port ' + PORT + ' already in use. Try: node session-viewer.js --port 3001');
-  } else {
-    console.error(e.message);
-  }
-  process.exit(1);
-});
+// ── static mode ──────────────────────────────────────────────────────────────
+if (args.includes('--static')) {
+  const sessions = loadAllSessions();
+  sessions.forEach(s => { s.cost = calcCost(s.model, s.totals); });
+  const html = buildHtml(sessions);
+  const out = path.join(os.tmpdir(), 'claude-session-viewer.html');
+  fs.writeFileSync(out, html, 'utf8');
+  console.log('Generated: ' + out);
+  const openCmd = process.platform === 'win32' ? 'start ""' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+  require('child_process').exec(openCmd + ' "' + out + '"');
+  process.exit(0);
+}
 
-server.listen(PORT, '127.0.0.1', () => {
+function onListen() {
   const url = 'http://localhost:' + PORT;
   console.log('Claude Session Viewer: ' + url);
   console.log('Reading from: ' + BASE);
@@ -801,4 +1029,43 @@ server.listen(PORT, '127.0.0.1', () => {
     const cmd = process.platform === 'win32' ? 'start' : process.platform === 'darwin' ? 'open' : 'xdg-open';
     require('child_process').exec(cmd + ' ' + url);
   }
+}
+
+function freePort(port, cb) {
+  const { exec } = require('child_process');
+  if (process.platform === 'win32') {
+    exec('netstat -ano', (err, stdout) => {
+      if (err) return cb();
+      const pids = new Set();
+      stdout.split('\n').forEach(line => {
+        if (line.includes(':' + port) && line.includes('LISTENING')) {
+          const m = line.trim().match(/(\d+)\s*$/);
+          if (m) pids.add(m[1]);
+        }
+      });
+      if (!pids.size) return cb();
+      let done = 0;
+      pids.forEach(pid => {
+        exec('taskkill /F /PID ' + pid, () => { if (++done === pids.size) cb(); });
+      });
+    });
+  } else {
+    exec('fuser -k ' + port + '/tcp', cb);
+  }
+}
+
+let retried = false;
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE' && !retried) {
+    retried = true;
+    console.log('Port ' + PORT + ' in use — freeing and retrying…');
+    freePort(PORT, () => {
+      setTimeout(() => server.listen(PORT, '127.0.0.1', onListen), 300);
+    });
+  } else {
+    console.error(e.code === 'EADDRINUSE' ? 'Port ' + PORT + ' still in use.' : e.message);
+    process.exit(1);
+  }
 });
+
+server.listen(PORT, '127.0.0.1', onListen);

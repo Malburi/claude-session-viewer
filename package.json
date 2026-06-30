@@ -6,6 +6,10 @@
                 "claude-session-viewer":  "./session-viewer.js"
             },
     "main":  "./session-viewer.js",
+    "scripts":  {
+                    "start":  "node session-viewer.js",
+                    "static": "node session-viewer.js --static"
+                },
     "engines":  {
                     "node":  "\u003e=16"
                 },
